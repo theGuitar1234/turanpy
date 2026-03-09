@@ -7,6 +7,7 @@ def OvR(X, y_multiclass, K, learning_rate, epochs):
         y_binary = [1 if yi == c else 0 for yi in y_multiclass]
         w, b = gd(y_binary, X, learning_rate, epochs)
         params.append((w, b))
+    print(params)
     return params 
 
 if __name__ == "__main__":

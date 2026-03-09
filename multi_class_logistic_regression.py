@@ -1,5 +1,6 @@
 from turanpy import algebra
 from turanpy import classification
+from turanpy.util import console
 
 def main(X, params, probs):
     
@@ -54,9 +55,15 @@ if __name__ == "__main__":
 
     X_all = Dog + Cat + Rabbit
 
-    y_all = [0]*len(Dog) + [1]*len(Cat) + [2]*len(Rabbit)
+    print(X_all)
 
-    K = 3
+    y_all = [0]*len(Dog) + [1]*len(Cat) + [2]*len(Rabbit)
+    #[0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2]
+
+    print(y_all)
+
+    K = 3 # 3 classes
+
 
     params = classification.OvR(X_all, y_all, K=3, learning_rate=0.0001, epochs=50000)
 
@@ -73,3 +80,4 @@ if __name__ == "__main__":
     # max prob anywhere: 0.7835887277005654
     # first sample probs: [0.5865183988284476, 0.20931299335740508, 0.20416860781414736]
     # first sample predicted class: 0
+

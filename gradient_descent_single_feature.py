@@ -21,7 +21,7 @@ if __name__ == "__main__":
     ]
 
     w = 6.00877193
-    b = 44.166666666666664
+    b = 45.166666666666664
 
     main(train_data, input, w, b)
     # For the weight 6.00877193 and bias 44.166666666666664,
