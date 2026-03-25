@@ -55,10 +55,7 @@ for i in range(len(row)):
         else:
             raise TypeError("Unknown Value, Supported Values are : TP, TN, FP, FN")
 
-print("\nConfusion Matrix : \n")
-print(row_str)
-
-print("\n Error analysis : \n")
+print("\nError analysis : \n")
 print(f"False Negatives : {num_FN}, False Positives : {num_FP}, True Negatives : {num_TN}, True Positives : {num_TP}")
 
 accuracy = (num_TP + num_TN) / (num_TN + num_FN + num_FP + num_TP)
@@ -70,3 +67,13 @@ print(f"Accuracy : {accuracy}")
 print(f"Percision : {percision}")
 print(f"Recall : {recall}")
 print(f"F1 Score : {f1_score}")
+
+# Error analysis :
+
+# False Negatives : 435, False Positives : 580, True Negatives : 5864, True Positives : 98
+# Accuracy : 0.8545220008599684
+# Percision : 0.14454277286135694
+# Recall : 0.18386491557223264
+# F1 Score : 0.16184971098265896
+
+print(f"\nConfusion matrix for {len(classes)} classes where OvR is class {OvR} \n\n{row_str}")

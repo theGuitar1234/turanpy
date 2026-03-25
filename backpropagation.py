@@ -2,6 +2,13 @@ import random
 import math
 import copy
 
+from enum import Enum
+
+class DataAugmentation(Enum):
+    JITTER_NOISE = 1
+    SAME_CLASS_INTERPOLATION = 2
+    MEASUREMENT_NOISE = 3
+
 def sigmoid(z):
     if z >= 0:
         return 1 / (1 + math.exp(-z))
@@ -46,6 +53,15 @@ def initWeightsAndBias(rows, cols):
     b = [random.uniform(-1, 1) for _ in range(rows)]
     return W, b
 
+def sumWeightSquares(WB):
+    total = 0.0
+    for l in range(len(WB)):
+        W, b = WB[l]
+        for row in range(len(W)):
+            for col in range(len(W[row])):
+                total += W[row][col] * W[row][col]
+    return total
+
 def initLayers(X, hidden_layers, output_dim=None, start_width=None):
     n_in = len(X[0])
 
@@ -66,11 +82,21 @@ def initLayers(X, hidden_layers, output_dim=None, start_width=None):
 
     return WB
 
-def forward_pass(x, WB, hidden_act, output_act):
+def bernoulli(size, p):
+    q = 1 - p
+
+    rand = [random.uniform(0, 1) for _ in range(size)]
+    mask = [int(r < q) for r in rand]
+
+    return mask
+
+def forward_pass(x, WB, hidden_act, output_act, training_mode=False, drop_out_rate=0.0):
     Z = []
     A = [x]
+    M = []
 
     current_input = x
+    keep_prob = 1.0 - drop_out_rate
 
     for l in range(len(WB)):
         W, b = WB[l]
@@ -83,24 +109,21 @@ def forward_pass(x, WB, hidden_act, output_act):
             current_a = [output_act(z) for z in current_z]
         else:
             current_a = [hidden_act(z) for z in current_z]
+            if training_mode and drop_out_rate > 0.0:
+                mask = bernoulli(len(current_a), drop_out_rate)
+                current_a = [mask[j] * current_a[j] / keep_prob for j in range(len(current_a))]
+                M.append(mask)
+            else:
+                M.append(None)
 
         Z.append(current_z)
         A.append(current_a)
 
         current_input = current_a
 
-    return Z, A
+    return Z, A, M
 
-def update_parameters(WB, grad_W, grad_b, learning_rate):
-    for l in range(len(WB)):
-        for row in range(len(WB[l][0])):
-            for col in range(len(WB[l][0][row])):
-                WB[l][0][row][col] -= learning_rate * grad_W[l][row][col]
-
-        for row in range(len(WB[l][1])):
-            WB[l][1][row] -= learning_rate * grad_b[l][row]
-
-def backward_pass(D, A, WB, dhidden_act_from_output):
+def backward_pass(D, A, M, WB, dhidden_act_from_output, training_mode=False, drop_out_rate=0.0):
     for l in range(len(WB) - 2, -1, -1):
         D[l] = []
 
@@ -112,6 +135,14 @@ def backward_pass(D, A, WB, dhidden_act_from_output):
 
             delta = back_signal * dhidden_act_from_output(A[l + 1][j])
             D[l].append(delta)
+    
+    if training_mode and drop_out_rate > 0.0:
+        keep_prob = 1.0 - drop_out_rate
+        for i in range(len(D) - 1):
+            if M[i] is not None:
+                d = D[i]
+                m = M[i]
+                D[i] = [m[j] * d[j] / keep_prob for j in range(len(d))]
 
     grad_W = [None] * len(WB)
     grad_b = [None] * len(WB)
@@ -130,6 +161,15 @@ def backward_pass(D, A, WB, dhidden_act_from_output):
             grad_b[l].append(D[l][row])
     
     return grad_W, grad_b
+
+def update_parameters(WB, grad_W, grad_b, learning_rate):
+    for l in range(len(WB)):
+        for row in range(len(WB[l][0])):
+            for col in range(len(WB[l][0][row])):
+                WB[l][0][row][col] -= learning_rate * grad_W[l][row][col]
+
+        for row in range(len(WB[l][1])):
+            WB[l][1][row] -= learning_rate * grad_b[l][row]
 
 def train_validation_split(X, Y, val_ratio=0.2, seed=42):
     X_shuffled, Y_shuffled = shuffle_dataset(X, Y, seed)
@@ -167,7 +207,58 @@ def evaluate_dataset(X, Y, WB, hidden_act, output_act):
     accuracy = correct / len(X)
     return avg_loss, accuracy
 
-def train(X, Y, X_val, Y_val, hidden_layers, output_dim, start_width, learning_rate, hidden_act, output_act, dact_from_output, dloss_output_delta, epochs):
+def data_augmentation(train_pairs, augmentation_type):
+    augmented_pairs = [([v for v in x], [t for t in y]) for x, y in train_pairs]
+
+    match augmentation_type:
+        case DataAugmentation.JITTER_NOISE:
+            jitter_strength = 0.03
+            for x, y in augmented_pairs:
+                for j in range(len(x)):
+                    x[j] += random.uniform(-jitter_strength, jitter_strength)
+        case DataAugmentation.MEASUREMENT_NOISE:
+            measurement_strength = 0.02
+            for x, y in augmented_pairs:
+                for j in range(len(x)):
+                    x[j] *= (1.0 + random.uniform(-measurement_strength, measurement_strength))
+                    x[j] = max(0.0, x[j])
+        case DataAugmentation.SAME_CLASS_INTERPOLATION:
+            same_class_groups = {}
+
+            for x, y in train_pairs:
+                label = y[0]
+                if label not in same_class_groups:
+                    same_class_groups[label] = []
+                same_class_groups[label].append((x, y))
+
+            synthetic_pairs = []
+
+            for label, samples in same_class_groups.items():
+                for _ in range(len(samples) // 2):
+                    if len(samples) >= 2:
+                        (x1, y1), (x2, y2) = random.sample(samples, 2)
+                    else:
+                        x1, y1 = samples[0]
+                        x2, y2 = samples[0]
+
+                    alpha = random.uniform(0.2, 0.8)
+
+                    x_new = [
+                        alpha * x1[j] + (1.0 - alpha) * x2[j]
+                        for j in range(len(x1))
+                    ]
+
+                    synthetic_pairs.append((x_new, y1[:]))
+
+            augmented_pairs.extend(synthetic_pairs)
+        case _:
+            raise ValueError("Unknown Data Augmentation Type")
+    return augmented_pairs
+
+
+def train(X, Y, X_val, Y_val, hidden_layers, output_dim, start_width, learning_rate, hidden_act, output_act, dact_from_output, dloss_output_delta, epochs, batch_size, l2_lambda=0, training_mode=False, drop_out_rate=0.0, data_augmentation_type=None):
+    if not (0.0 <= drop_out_rate < 1.0):
+        raise ValueError("drop_out_rate must be in [0.0, 1.0)")
 
     WB = initLayers(X, hidden_layers, output_dim, start_width)
 
@@ -176,38 +267,60 @@ def train(X, Y, X_val, Y_val, hidden_layers, output_dim, start_width, learning_r
     patience = 400
     patience_counter = 0
 
+    current_lr = learning_rate
+    initial_lr = learning_rate
+    decay_factor = 0.5
+    step_size = 500
+
     for epoch in range(epochs):
-        epoch_loss = 0.0
+        train_data_loss = 0.0
+        train_reg_loss = 0.0
+        train_total_loss = train_data_loss + train_reg_loss
 
         train_pairs = list(zip(X, Y))
         random.shuffle(train_pairs)
 
-        sum_gradW = [[[0 for _ in range(len(j))] for j in i[0]] for i in WB]
-        sum_gradb = [[0 for _ in range(len(i[1]))] for i in WB]
+        if data_augmentation_type is not None:
+            train_pairs = data_augmentation(train_pairs, data_augmentation_type)
 
-        for x, y in train_pairs:
-            Z, A = forward_pass(x, WB, hidden_act, output_act)
+        for batch_start in range(0, len(train_pairs), batch_size):
+            batch = train_pairs[batch_start:batch_start + batch_size]
 
-            y_hat = A[-1]
+            sum_gradW = [[[0 for _ in range(len(j))] for j in i[0]] for i in WB]
+            sum_gradb = [[0 for _ in range(len(i[1]))] for i in WB]
 
-            epoch_loss += loss(y_hat, y)
+            for x, y in batch:
+                Z, A, M = forward_pass(x, WB, hidden_act, output_act, training_mode, drop_out_rate)
 
-            D = [None] * len(WB)
-            D[-1] = [dloss_output_delta(y_hat[i], y[i]) for i in range(len(y_hat))]
+                y_hat = A[-1]
 
-            grad_W, grad_b = backward_pass(D, A, WB, dact_from_output)
+                bce_loss = loss(y_hat, y)
+                train_data_loss += bce_loss
 
-            for i in range(len(sum_gradW)):
-                for j in range(len(sum_gradW[i])):
-                    for k in range(len(sum_gradW[i][j])):
-                        sum_gradW[i][j][k] += grad_W[i][j][k] / len(X)
-            for i in range(len(sum_gradb)):
-                for j in range(len(sum_gradb[i])):
-                    sum_gradb[i][j] += grad_b[i][j] / len(X)
-        
-        update_parameters(WB, sum_gradW, sum_gradb, learning_rate)
-        
-        train_loss = epoch_loss / len(X)
+                D = [None] * len(WB)
+                D[-1] = [dloss_output_delta(y_hat[i], y[i]) for i in range(len(y_hat))]
+
+                grad_W, grad_b = backward_pass(D, A, M, WB, dact_from_output, training_mode, drop_out_rate)
+
+                for i in range(len(sum_gradW)):
+                    for j in range(len(sum_gradW[i])):
+                        for k in range(len(sum_gradW[i][j])):
+                            sum_gradW[i][j][k] += grad_W[i][j][k] / len(batch)
+                for i in range(len(sum_gradb)):
+                    for j in range(len(sum_gradb[i])):
+                        sum_gradb[i][j] += grad_b[i][j] / len(batch)
+            
+            for l in range(len(WB)):
+                W, b = WB[l]
+                for row in range(len(W)):
+                    for col in range(len(W[row])):
+                        sum_gradW[l][row][col] += l2_lambda * W[row][col]
+            update_parameters(WB, sum_gradW, sum_gradb, current_lr)
+      
+        train_data_loss = train_data_loss / len(train_pairs)
+        train_reg_loss = (l2_lambda / 2) * sumWeightSquares(WB)
+        train_total_loss = train_data_loss + train_reg_loss
+
         val_loss, val_acc = evaluate_dataset(X_val, Y_val, WB, hidden_act, output_act)
 
         if val_loss < best_val_loss:
@@ -216,27 +329,32 @@ def train(X, Y, X_val, Y_val, hidden_layers, output_dim, start_width, learning_r
             patience_counter = 0
         else:
             patience_counter += 1
+        
+        if epoch > 0 and epoch % 500 == 0:
+            current_lr = initial_lr * (decay_factor ** (epoch // step_size))
 
         if epoch % 500 == 0:
-            avg_loss = epoch_loss / len(X)
             print(
-                "epoch =", epoch, 
-                "avg_loss =", avg_loss,
-                "train_loss =", round(train_loss, 6),
+                "epoch =", epoch,
+                "train_data_loss =", round(train_data_loss, 6),
+                "train_reg_loss =", round(train_reg_loss, 6),
+                "train_total_loss =", round(train_total_loss, 6),
                 "val_loss =", round(val_loss, 6),
                 "val_acc =", round(val_acc, 4)
             )
-
-        # if patience_counter >= patience:
-        #     print("early stopping at epoch", i)
-        #     break
+            
+        if patience_counter >= patience:
+            print("early stopping at epoch", epoch)
+            break
+    
+    final_WB = best_WB if best_WB is not None else WB
         
     x1 = X[0]
     x2 = X[-1]
-    print(f"\nFinal Predictions: {forward_pass(x1, WB, hidden_act, output_act)[1][-1]}")
-    print(f"Final Predictions: {forward_pass(x2, WB, hidden_act, output_act)[1][-1]}")
+    print(f"\nFinal Predictions: {forward_pass(x1, final_WB, hidden_act, output_act)[1][-1]}")
+    print(f"Final Predictions: {forward_pass(x2, final_WB, hidden_act, output_act)[1][-1]}")
 
-    return best_WB if best_WB is not None else WB
+    return final_WB
 
 def predict_one(x, WB, hidden_act, output_act):
     cache = forward_pass(x, WB, hidden_act, output_act)
@@ -342,6 +460,11 @@ if __name__ == "__main__":
         dact_from_output=drelu_from_output,
         dloss_output_delta=output_delta_binary_bce,
         epochs=3000,
+        batch_size=4,
+        l2_lambda=0.03,
+        training_mode=True,
+        drop_out_rate=0.2,
+        data_augmentation_type=None
     )
 
     val_loss, val_acc = evaluate_dataset(X_val, Y_val, WB, relu, sigmoid)
