@@ -37,6 +37,12 @@ class NeuralNetwork:
         LECUN_NORMAL = 5
         LECUN_UNIFORM = 6
         ZERO = 7
+    
+    class BiasInitStrategy(Enum):
+        ZERO = 1
+        CONSTANT = 2
+        NORMAL = 3
+        UNIFORM = 4
 
     class LossType(Enum):
         MSE = 1
@@ -76,6 +82,9 @@ class NeuralNetwork:
         patience: int = 100
         decay_factor: float = 0.5
         seed: int = 42
+        start_width_heuristic_cap: int = 512
+        output_aware_multiplier: int = 4
+        expansion_multiplier: int = 2
     
     @dataclass
     class TrainResults:
@@ -89,7 +98,7 @@ class NeuralNetwork:
         final_learning_rate: float
         filepath: str = "models/"
 
-    def __init__(self, number_of_features, layers, loss_type=None, output_activation_type=OutputActivationType.SIGMOID, hidden_activation_type=HiddenActivationType.RELU, hidden_weight_init_strategy=None, output_weight_init_strategy=None, init_seed=None, init_rng=None):
+    def __init__(self, number_of_features, layers, loss_type=None, output_activation_type=OutputActivationType.SIGMOID, hidden_activation_type=HiddenActivationType.RELU, hidden_weight_init_strategy=None, output_weight_init_strategy=None, bias_init_strategy=None, init_seed=None, init_random_range=None, hidden_bias_value=0.0, output_positive_prior=None):
         if type(number_of_features) is not int:
             raise TypeError("number_of_features must be an integer")
         if number_of_features < 1:
@@ -150,13 +159,30 @@ class NeuralNetwork:
         if output_weight_init_strategy is None:
             output_weight_init_strategy = self.default_output_weight_init_strategy(output_activation_type)
 
-        if init_seed is not None and init_rng is not None:
-            raise ValueError("Provide either init_seed or init_rng, not both")
+        if bias_init_strategy is None:
+            bias_init_strategy = self.BiasInitStrategy.ZERO
+        elif bias_init_strategy not in self.BiasInitStrategy:
+            raise ValueError(f"bias_init_strategy must be one of {list(self.BiasInitStrategy)}")
 
-        if init_rng is not None and not isinstance(init_rng, np.random.Generator):
+        if hidden_bias_value is None:
+            hidden_bias_value = 0.0
+        if not isinstance(hidden_bias_value, (int, float, np.floating)):
+            raise TypeError("hidden_bias_value must be a float")
+        hidden_bias_value = float(hidden_bias_value)
+        
+        if init_seed is not None and init_random_range is not None:
+            raise ValueError("Provide either init_seed or init_rng, not both")
+        if init_random_range is not None and not isinstance(init_random_range, np.random.Generator):
             raise TypeError("init_rng must be a numpy.random.Generator")
 
-        self.__init_rng = init_rng if init_rng is not None else np.random.default_rng(init_seed)
+        if output_positive_prior is not None:
+            if not isinstance(output_positive_prior, (int, float, np.floating)):
+                raise TypeError("output_positive_prior must be a float")
+            output_positive_prior = float(output_positive_prior)
+            if not (0.0 < output_positive_prior < 1.0):
+                raise ValueError("output_positive_prior must be strictly between 0 and 1")
+    
+        self.__init_random_range = init_random_range if init_random_range is not None else np.random.default_rng(init_seed)
         self.__L = len(layers)
         self.__cache = []
         self.__WB = []
@@ -181,11 +207,20 @@ class NeuralNetwork:
                 fan_out,
                 fan_in,
                 current_weight_init_strategy,
-                rng=self.__init_rng,
+                rng=self.__init_random_range,
                 alpha=current_alpha
             )
 
-            random_biases = np.zeros((fan_out, 1))
+            random_biases = self.init_biases(
+                fan_out,
+                bias_init_strategy,
+                rng=self.__init_random_range,
+                is_output_layer=(i == self.__L - 1),
+                hidden_activation_type=self.__hidden_activation_type,
+                output_activation_type=self.__output_activation_type,
+                hidden_bias_value=hidden_bias_value,
+                output_positive_prior=output_positive_prior
+            )
 
             self.__WB.append((random_weights, random_biases))
 
@@ -210,7 +245,7 @@ class NeuralNetwork:
         return self.__hidden_activation_type
     
     @classmethod
-    def init_layers(cls, X, number_of_hidden_layers, output_width=None, start_width=None, hidden_width=None, parameter_budget=None, layer_strategy=None, start_width_heurist=None):
+    def init_layers(cls, X, number_of_hidden_layers, output_width=None, start_width=None, hidden_width=None, parameter_budget=None, layer_strategy=None, start_width_heurist=None, start_width_heuristic_cap=512, output_aware_multiplier=4, expansion_multiplier=2):
         if layer_strategy is None:
             layer_strategy = cls.LayerStrategies.GEOMETRIC_TAPER
         if start_width_heurist is None:
@@ -236,9 +271,9 @@ class NeuralNetwork:
                 case cls.StartWidthHeuristics.INPUT_WIDTH:
                     start_width = input_width
                 case cls.StartWidthHeuristics.CAPPED_INPUT_WIDTH:
-                    start_width = min(512, input_width)
+                    start_width = min(start_width_heuristic_cap, input_width)
                 case cls.StartWidthHeuristics.OUTPUT_AWARE:
-                    start_width = max(output_width * 4, min(512, input_width))
+                    start_width = max(output_width * 4, min(start_width_heuristic_cap, input_width))
                 case _:
                     raise ValueError(f"Unknown Start Width Heuristic, supported values are : {cls.StartWidthHeuristics.INPUT_WIDTH}, {cls.StartWidthHeuristics.CAPPED_INPUT_WIDTH}, {cls.StartWidthHeuristics.OUTPUT_AWARE}")
         elif not isinstance(start_width, int):
@@ -299,7 +334,7 @@ class NeuralNetwork:
                 ]
             
             case cls.LayerStrategies.EXPANSION_COMPRESSION:
-                peak_width = max(start_width, input_width * 2)
+                peak_width = max(start_width, input_width * expansion_multiplier)
                 if number_of_hidden_layers == 1:
                     layers = [peak_width]
                 else:
@@ -388,6 +423,86 @@ class NeuralNetwork:
 
         return hidden + [output_width]
     
+    @classmethod
+    def init_weights(cls, fan_out, fan_in, weight_init_strategy, rng=None, alpha=0.0):
+        if rng is None:
+            rng = np.random.default_rng()
+
+        if fan_in < 1 or fan_out < 1:
+            raise ValueError("fan_in and fan_out must be positive integers")
+
+        match weight_init_strategy:
+            case cls.WeightInitStrategy.XAVIER_NORMAL:
+                std = np.sqrt(2.0 / (fan_in + fan_out))
+                return rng.standard_normal((fan_out, fan_in)) * std
+
+            case cls.WeightInitStrategy.XAVIER_UNIFORM:
+                limit = np.sqrt(6.0 / (fan_in + fan_out))
+                return rng.uniform(-limit, limit, size=(fan_out, fan_in))
+
+            case cls.WeightInitStrategy.HE_NORMAL:
+                std = np.sqrt(2.0 / ((1.0 + alpha ** 2) * fan_in))
+                return rng.standard_normal((fan_out, fan_in)) * std
+
+            case cls.WeightInitStrategy.HE_UNIFORM:
+                limit = np.sqrt(6.0 / ((1.0 + alpha ** 2) * fan_in))
+                return rng.uniform(-limit, limit, size=(fan_out, fan_in))
+
+            case cls.WeightInitStrategy.LECUN_NORMAL:
+                std = np.sqrt(1.0 / fan_in)
+                return rng.standard_normal((fan_out, fan_in)) * std
+
+            case cls.WeightInitStrategy.LECUN_UNIFORM:
+                limit = np.sqrt(3.0 / fan_in)
+                return rng.uniform(-limit, limit, size=(fan_out, fan_in))
+
+            case cls.WeightInitStrategy.ZERO:
+                return np.zeros((fan_out, fan_in))
+
+            case _:
+                raise ValueError(f"Unknown Weight Init Strategy, supported values are : {list(NeuralNetwork.WeightInitStrategy)}")
+    
+    @staticmethod
+    def logit(p, epsilon=1e-12):
+        p = float(np.clip(p, epsilon, 1.0 - epsilon))
+        return np.log(p / (1.0 - p))
+
+    @classmethod
+    def init_biases(cls, fan_out, bias_init_strategy, range=None, value=0.01, std=1e-3, is_output_layer=False, hidden_activation_type=None, output_activation_type=None, hidden_bias_value=0.0, output_positive_prior=None, epsilon=1e-12):
+        if fan_out < 1:
+            raise ValueError("fan_out must be a positive integer")
+    
+        if range is None:
+            range = np.random.default_rng()
+        
+        if is_output_layer and output_positive_prior is not None:
+            if output_activation_type != cls.OutputActivationType.SIGMOID:
+                raise ValueError("output_positive_prior is only supported for SIGMOID output layers")
+            if fan_out != 1:
+                raise ValueError("output_positive_prior requires fan_out == 1")
+
+            b0 = cls.logit(output_positive_prior, epsilon)
+            return np.full((fan_out, 1), b0, dtype=float)
+                
+        if (not is_output_layer and hidden_activation_type == cls.HiddenActivationType.RELU and hidden_bias_value != 0.0):
+            return np.full((fan_out, 1), hidden_bias_value, dtype=float)
+
+        match bias_init_strategy:
+            case cls.BiasInitStrategy.ZERO:
+                return np.zeros((fan_out, 1))
+
+            case cls.BiasInitStrategy.CONSTANT:
+                return np.full((fan_out, 1), value)
+
+            case cls.BiasInitStrategy.NORMAL:
+                return range.standard_normal((fan_out, 1)) * std
+
+            case cls.BiasInitStrategy.UNIFORM:
+                return range.uniform(-value, value, size=(fan_out, 1))
+
+            case _:
+                raise ValueError("Unknown Bias Init Strategy")
+    
     @staticmethod
     def linear_model(W, X, b):
         return np.matmul(W, X) + b
@@ -463,46 +578,7 @@ class NeuralNetwork:
         m = Y.shape[1]
         A = np.clip(A, epsilon, 1.0 - epsilon)
         return -np.sum(Y * np.log(A) + (1 - Y) * np.log(1 - A)) / m
-    
-    @staticmethod
-    def init_weights(fan_out, fan_in, weight_init_strategy, rng=None, alpha=0.0):
-        if rng is None:
-            rng = np.random.default_rng()
-
-        if fan_in < 1 or fan_out < 1:
-            raise ValueError("fan_in and fan_out must be positive integers")
-
-        match weight_init_strategy:
-            case NeuralNetwork.WeightInitStrategy.XAVIER_NORMAL:
-                std = np.sqrt(2.0 / (fan_in + fan_out))
-                return rng.standard_normal((fan_out, fan_in)) * std
-
-            case NeuralNetwork.WeightInitStrategy.XAVIER_UNIFORM:
-                limit = np.sqrt(6.0 / (fan_in + fan_out))
-                return rng.uniform(-limit, limit, size=(fan_out, fan_in))
-
-            case NeuralNetwork.WeightInitStrategy.HE_NORMAL:
-                std = np.sqrt(2.0 / ((1.0 + alpha ** 2) * fan_in))
-                return rng.standard_normal((fan_out, fan_in)) * std
-
-            case NeuralNetwork.WeightInitStrategy.HE_UNIFORM:
-                limit = np.sqrt(6.0 / ((1.0 + alpha ** 2) * fan_in))
-                return rng.uniform(-limit, limit, size=(fan_out, fan_in))
-
-            case NeuralNetwork.WeightInitStrategy.LECUN_NORMAL:
-                std = np.sqrt(1.0 / fan_in)
-                return rng.standard_normal((fan_out, fan_in)) * std
-
-            case NeuralNetwork.WeightInitStrategy.LECUN_UNIFORM:
-                limit = np.sqrt(3.0 / fan_in)
-                return rng.uniform(-limit, limit, size=(fan_out, fan_in))
-
-            case NeuralNetwork.WeightInitStrategy.ZERO:
-                return np.zeros((fan_out, fan_in))
-
-            case _:
-                raise ValueError(f"Unknown Weight Init Strategy, supported values are : {list(NeuralNetwork.WeightInitStrategy)}")
-
+        
     def default_hidden_weight_init_strategy(self, hidden_activation_type):
         match hidden_activation_type:
             case self.HiddenActivationType.RELU | self.HiddenActivationType.LEAKY_RELU:
@@ -564,7 +640,7 @@ class NeuralNetwork:
 
         return self.multi_class_cross_entropy_loss(Y, A, epsilon)
 
-    def output_delta_binary_bce(self, y_hat, y):
+    def output_delta(self, y_hat, y):
         return y_hat - y
 
     def bernoulli(self, shape, p):
@@ -629,8 +705,8 @@ class NeuralNetwork:
 
         m = Y.shape[1]
         grads = [None] * self.__L
-
-        dZ = cache[-1] - Y
+        
+        dZ = self.output_delta(cache[-1], Y)
 
         for l in range(self.__L - 1, -1, -1):
             A_prev = cache[l]
@@ -646,8 +722,8 @@ class NeuralNetwork:
                 if training_mode and drop_out_rate > 0.0 and M[l - 1] is not None:
                     dA_prev = (dA_prev * M[l - 1]) / keep_prob
                 
-                A_prev_raw = activation_cache[l - 1]
-                dZ = dA_prev * self.hidden_derivative_from_output(A_prev_raw, hidden_activation_type)
+                A_prev = activation_cache[l - 1]
+                dZ = dA_prev * self.hidden_derivative_from_output(A_prev, hidden_activation_type)
 
         return grads
 
