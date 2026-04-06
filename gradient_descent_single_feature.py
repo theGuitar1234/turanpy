@@ -11,17 +11,17 @@ def main(train_data, input, w, b):
 
 if __name__ == "__main__":
 
-    train_data = [50, 55, 70, 75, 85]
+    train_data = [25, 50, 100, 200, 400]
     input = [
-        [1],
-        [2],
-        [4],
-        [5],
-        [6]
+        [50],
+        [100],
+        [200],
+        [400],
+        [800]
     ]
 
-    w = 6.00877193
-    b = 45.166666666666664
+    w = 2
+    b = 0
 
     main(train_data, input, w, b)
     # For the weight 6.00877193 and bias 44.166666666666664,

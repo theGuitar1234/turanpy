@@ -1,11 +1,12 @@
 from turanpy.classification import single_class_logistic_gradient_descent as gd
 from turanpy.calculus import sigmoid
 from turanpy.algebra import lm
+from turanpy.classification import MSE_gradient_descent as msgd
 
 import random 
 
 def main(X, y):
-    res = gd(y, X, 0.01, 50000)
+    res = msgd(y, X, 0.01, 50000)
     for _ in range(5):
         h = random.randint(0, 10)
         print(f"Hours studied: {h}", sigmoid(lm(h, res[0], res[1])))
